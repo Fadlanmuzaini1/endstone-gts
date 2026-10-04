@@ -1,0 +1,2 @@
+[endstone]
+gts = endstone_gts:GtsPlugin

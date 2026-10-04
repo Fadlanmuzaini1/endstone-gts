@@ -1,0 +1,143 @@
+# endstone-gts — Global Trading Station (Item Market) for Endstone
+
+GUI item marketplace for Minecraft Bedrock on [Endstone](https://github.com/EndstoneMC/endstone) 0.11.x.
+SQLite storage, JWEconomy money, Endstone Forms UI. **Items only** (no Pokémon yet), but the core is
+type-agnostic (`Listing` → `ItemListing`; `listing_type` column; `ListingFactory.register`).
+
+Design reference: `Gts-2.6.0-fabric.jar` (concepts only: listing, seller/price/end time, per-player
+limit, expiry → reclaim, history, tax, ban list). No Fabric API is used.
+
+## Status — read this first
+
+| Part | State |
+|---|---|
+| Core (DB, sagas, recovery, reclaim, expiry, search, pagination) | Implemented, 71 automated tests pass (fakes for the game; real `endstone.nbt` tags) |
+| GUI + commands | Implemented, driven end-to-end in tests against stand-in form classes |
+| **Not run on a real Endstone server** | The Endstone runtime cannot load outside a server. Item NBT save/restore and the `/gts` usage syntax are written against the documented 0.11 API but need your smoke test (checklist below) |
+| JWEconomy adapter | Written against JWEconomy's real source and integration-tested with it (no server) |
+
+## Install
+```
+pip install endstone-gts      # or: pip install dist/endstone_gts-0.1.0-py3-none-any.whl
+```
+Put the wheel in the server's `plugins/` folder (Endstone loads pip-style plugin wheels), start the
+server, edit `plugins/gts/config.toml`, run `/gts reload`. Requires JWEconomy loaded (soft dependency).
+
+## JWEconomy
+Integrated with the real JWEconomy 2.0.x API (`plugin.economy_api`, coroutines run through `plugin.run_async`):
+balance → `get_balance`, withdraw → `remove_balance` (`None` = insufficient funds), deposit → `add_balance`.
+No setup is needed beyond having JWEconomy installed; GTS declares it as a soft dependency. Options in
+`[economy.jweconomy]`: `plugin_name` (default `jweconomy`), `currency` (empty = JWEconomy's default), `timeout_seconds`.
+
+Behaviours worth knowing:
+* A timeout or an exception *after* a call was submitted is treated as "outcome unknown": the transaction is held for staff (`/gts review`), never retried blindly.
+* JWEconomy silently clamps balances at its `max_balance`; GTS checks headroom first and refuses (and retries later) instead of letting money vanish.
+* JWEconomy's `remove_balance` returns `0.0` when a balance is drained exactly; that is correctly treated as success.
+* Verified by tests that run GTS against JWEconomy's actual source code (service, repositories, SQLite, cache, async loop).
+
+## Commands & permissions
+`/gts` (alias `/market`) `· sell · items · listings · history · search <q>` — `gts.command.use` (everyone).
+Admin (`gts.command.admin`, op): `reload`, `review`, `inspect`, `resolve tx <id> <sold|activate|close|paid|retry>`,
+`resolve reclaim <listing id> <delivered|retry>`.
+
+## Configuration
+`plugins/gts/config.toml` (defaults in `src/endstone_gts/config.toml`): `[listing]` max_active_listings,
+minimum/maximum_price, expiration_hours, listing_fee, tax_percent, banned_items, strict_item_roundtrip,
+allow_lossy_serialization · `[display]` items_per_page, currency_symbol · `[economy]` provider + jweconomy
+binding · `[database]` file (plain name, stored in the plugin folder) · `[maintenance]` sweep_interval_seconds.
+
+## Architecture
+```
+src/endstone_gts/
+  plugin.py            wiring, lifecycle, events, sweep task
+  commands/gts.py      /gts dispatch          ui/  main browse sell manage history (forms only)
+  config/config.py     validated config       items/ listing serializer nbt_codec validator inventory
+  database/            database(+migrations) listings transactions history repositories
+  economy/             provider (contract) jweconomy (adapter)
+  listings/manager.py  browse, cancel, reclaim, expire
+  transactions/        manager (sell/buy sagas) recovery (+ AdminResolver)
+```
+Startup order: config → DB + migrations → economy → recovery → cache count → commands/events → sweep task.
+Database work runs on the server thread (Endstone's scheduler only offers synchronous tasks); queries are
+indexed and paginated with `LIMIT/OFFSET`, nothing loads the whole table.
+
+### Schema (migration v1)
+`listings(id, listing_type, seller_uuid, seller_name, item_data, item_identifier, display_name, search_text,
+amount, price, status, reclaim_state, created_at, expires_at, updated_at)`; status ∈ ACTIVE SOLD CANCELLED
+EXPIRED PROCESSING FAILED; `reclaim_state` ∈ NONE PENDING(=ITEM_PENDING_RECLAIM) DELIVERING DONE REVIEW.
+`transactions(transaction_id, kind, listing_id, seller_*, buyer_*, price, fee, item_summary, status, step,
+payout_state, detail, created_at, completed_at)`. Indexes on status, seller_uuid, created_at, item_identifier,
+plus a partial UNIQUE index allowing one in-flight BUY per listing. History = transactions + cancelled/expired listings.
+
+### Item properties, durability and anti-repair exploit
+Endstone's `ItemStack.nbt` is only the item's *user-data tag*; durability, enchantments, name and lore are
+managed through `ItemMeta`. GTS stores both, restores the NBT **and** then explicitly re-applies any meta the NBT
+did not bring back, and the sell-time round trip must reproduce durability/enchants exactly or the item is refused.
+Delivery of any item carrying data (tools, armor, enchanted/named items...) places it in an empty slot, **reads it
+back from the inventory and compares** id/amount/meta exactly (NBT as a subset, so game-added tags are fine). If the
+game did not keep it exactly, the item is removed again and the purchase fails safely (buyer refunded, listing stays
+active, item intact). Same path for cancel/expire/reclaim, so "sell a broken tool, cancel, get it repaired" is closed.
+Listings show `Durability: 61/1561 (4%)`, enchantments (`Efficiency V`), unbreakable and lore in the detail,
+sell-confirm and My Listings screens, plus a `✦`/percent tag on list buttons.
+`/gts inspect` (admin, hold an item) prints what Endstone reports for that item and whether it round-trips.
+
+### Icons
+Every menu button has its own icon and every listing button shows the item being sold, using vanilla
+resource-pack texture paths (no resource pack needed). Item paths come from `data/item_icons.json`, generated from
+Mojang's bedrock-samples by `tools/build_icons.py` (2.2k items/blocks; blocks show their flat face texture, unknown or
+modded items just have no icon). Turn off with `[display] icons = false`.
+
+### Language / Bahasa
+Set `[display] language = "en"` or `"id"` (Bahasa Indonesia) in `config.toml`, then `/gts reload` (applies instantly).
+All forms, buttons, player messages, item property labels and command replies are translated; unknown values fall
+back to English with a config warning. Item and enchantment names come from the item identifier and stay English.
+Translations live in `src/endstone_gts/i18n.py` (`ID` dict: English source text -> Indonesian); a test fails if any
+`tr()` string lacks a translation or loses a placeholder. Admin/console diagnostics (`/gts review`, logs) stay English.
+
+Renamed items: the Properties block also shows `Item: <vanilla name>` (e.g. `Item: Diamond Pickaxe`) whenever the
+custom name differs from the real item, so a "Free Diamond" label cannot hide what is actually being sold.
+
+### Item serialization
+`ItemStack.type.id/amount/data` + the full `ItemStack.nbt` encoded **tag-type-preserving** (byte≠short≠int),
+plus ItemMeta as fallback. Before any item is taken, the payload is rebuilt and re-serialized and must be
+identical (`strict_item_roundtrip`); otherwise the item is refused rather than risked. Items whose NBT can't be
+read are refused unless `allow_lossy_serialization = true`.
+
+### Transaction safety (summary)
+* Every state change is a compare-and-swap `UPDATE … WHERE status = <expected>`; the winner is whoever changes 1 row.
+* Buy: claim (ACTIVE→PROCESSING + journal, one DB transaction) → journal `WITHDRAWING` → withdraw → `WITHDRAWN`
+  → `DELIVERING` → give item → listing SOLD/tx COMPLETED → seller payout (own CAS state; retried only if provably not paid).
+* Journal-before-effect means a crash always leaves "how far did we get". Provably-safe states are finished or
+  rolled back automatically; ambiguous ones (`WITHDRAWING`, `DELIVERING`, `REFUNDING`, payout in flight, interrupted
+  reclaim) become `NEEDS_REVIEW` with the item still held — never auto-refunded or re-delivered.
+* Inventory full → checked before the claim and money step; nothing charged. Cancel/expire never delete: the item
+  stays reclaimable (`My Listings → Reclaim`, join notice).
+* Listing fee is charged only inside the sell saga and refunded if the item can't be taken.
+
+## Testing
+`pip install pytest && pytest` (no server needed). On a server, smoke-test:
+1. Sell a plain stack, a **partial** stack, an enchanted/renamed item, a tool with damage, a shulker with contents;
+   buy each with a second account and compare (name, lore, enchants, durability, contents).
+2. Sell with a full inventory buyer → refused, no money moved. Cancel with full inventory → Reclaim works.
+3. Two players press BUY on the same listing; spam BUY; disconnect mid-purchase.
+4. `kill -9` the server while a purchase is open (use a slow economy) → restart → check `/gts review`.
+5. Wait for expiry (set `expiration_hours = 1`) → item reclaimable; listing limit; fee; tax.
+6. Economy plugin unloaded → buy refused cleanly. Check `/gts` usage tab-completion.
+
+## Security review
+| Risk | Mitigation |
+|---|---|
+| Item / money duplication, double purchase, double click, race | CAS claim + partial unique index; per-player in-flight guard; verified with an 8-thread, 8-connection race test |
+| Item loss on sell / cancel / expiry | Listing persisted *before* removal; exact-slot match re-verified at removal; restore on mismatch; round-trip check; cancel/expire only flip state, item delivered via reclaim |
+| Inventory-full exploits | Capacity pre-check; delivery rolls back partial adds; failure ⇒ no charge, listing stays ACTIVE |
+| Disconnect / crash / restart mid-transaction | Step journal + recovery (idempotent, tested for every step); ambiguity parked |
+| Economy / DB / serialization failure | Three-way economy contract; DB error after item removal returns the item; unreadable NBT refused |
+| Negative / huge / non-integer price, overflow | Digits-only parse, min/max config, hard cap 10^15, SQL `CHECK(price>0)` |
+| SQL injection | Parameterized queries only; LIKE wildcards escaped; ORDER BY strings are constants |
+| Listing-limit bypass | Count + insert in one `BEGIN IMMEDIATE` transaction |
+| Own-listing / expired / cancelled-while-sold buys | Enforced inside the claim UPDATE |
+| Form text injection | Player-controlled text sanitized (`clean`) |
+
+Known limitations: crash in the microseconds between an inventory/economy call and its journal write is ambiguous
+by nature and goes to staff review; the economy cannot be queried for a ledger so GTS cannot self-resolve those.
+Forms use ActionForm buttons for confirmations (not MessageForm) to avoid ambiguity about button indexes.

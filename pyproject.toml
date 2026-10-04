@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "endstone-gts"
+version = "0.1.1"
+description = "Global Trading Station: GUI item marketplace for Endstone (Bedrock) using SQLite and JWEconomy"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["endstone>=0.11"]
+
+[project.entry-points."endstone"]
+gts = "endstone_gts:GtsPlugin"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+endstone_gts = ["config.toml", "data/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

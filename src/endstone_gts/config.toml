@@ -1,0 +1,50 @@
+# GTS (Global Trading Station) - Item marketplace
+# Edit and run /gts reload (some values need a full restart: database.file, economy.provider)
+
+[gts]
+enabled = true
+
+[listing]
+max_active_listings = 5
+minimum_price = 1
+maximum_price = 1000000000
+expiration_hours = 48
+# Charged to the seller when a listing is created. Refunded if creation fails.
+listing_fee = 0
+# Percentage of the sale price kept by the server when an item sells (0-100).
+tax_percent = 0
+# Item identifiers that cannot be listed, e.g. ["minecraft:bedrock"]
+banned_items = []
+# Refuse to list an item unless it survives a serialize -> deserialize -> serialize
+# round trip unchanged. Keep this true: it is what protects items from being lost.
+strict_item_roundtrip = true
+# Allow listing items whose NBT could not be read (metadata-only fallback, may lose data).
+allow_lossy_serialization = false
+
+[display]
+items_per_page = 8
+currency_symbol = "$"
+# Show icons on buttons (menu icons + the item being sold). Uses vanilla textures, no resource pack needed.
+icons = true
+# Language of all player-facing text: "en" (English) or "id" (Bahasa Indonesia).
+language = "en"
+
+[economy]
+provider = "jweconomy"
+
+# Uses JWEconomy's public API (plugin.economy_api: get_balance / add_balance / remove_balance).
+[economy.jweconomy]
+# Loaded plugin name (JWEconomy registers itself as "jweconomy").
+plugin_name = "jweconomy"
+# Currency id from JWEconomy's config. Empty = its default currency.
+currency = ""
+# JWEconomy runs on its own async thread; GTS waits at most this long for each call.
+# A timeout is treated as "outcome unknown" and the transaction is held for staff review.
+timeout_seconds = 5
+
+[database]
+file = "gts.db"
+
+[maintenance]
+# How often (seconds) expired listings are swept and pending seller payouts are retried.
+sweep_interval_seconds = 60
