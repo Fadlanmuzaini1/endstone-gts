@@ -36,6 +36,7 @@ MENU = {
 
 _enabled = True
 _item_icons: dict[str, str] | None = None
+_extra_icons: dict[str, str] | None = None
 
 
 def configure(enabled: bool) -> None:
@@ -53,6 +54,21 @@ def _load() -> dict[str, str]:
     return _item_icons
 
 
+def _load_extra() -> dict[str, str]:
+    """Namespaced packs (data/item_icons_<pack>.json, keys are full ids like 'pokeb:rare_candy'). Their paths
+    only render for players who have that resource pack, which is a no-op icon otherwise."""
+    global _extra_icons
+    if _extra_icons is None:
+        merged: dict[str, str] = {}
+        for f in sorted((Path(__file__).parent.parent / "data").glob("item_icons_*.json")):
+            try:
+                merged.update(json.loads(f.read_text()))
+            except (OSError, ValueError):
+                pass
+        _extra_icons = merged
+    return _extra_icons
+
+
 def menu(name: str) -> str | None:
     return MENU.get(name) if _enabled else None
 
@@ -63,5 +79,5 @@ def item(identifier: str) -> str | None:
         return None
     namespace, name = identifier.split(":", 1)
     if namespace != "minecraft":
-        return None
+        return _load_extra().get(identifier)
     return _load().get(name)
